@@ -3,6 +3,7 @@ const fetch = require("node-fetch");
 const cheerio = require("cheerio");
 const compression = require("compression");
 const zlib = require("zlib");
+const { HttpsProxyAgent } = require("https-proxy-agent");
 
 // ============================================================
 // CONFIGURATION
@@ -12,11 +13,38 @@ const SOURCE_ORIGIN = `https://${SOURCE_HOST}`;
 const MIRROR_HOST = process.env.MIRROR_HOST || "mgkomik.co";
 const PORT = process.env.PORT || 3000;
 
-// Cloudflare Worker URL — fetches from source inside CF's trusted network
-const WORKER_URL = process.env.WORKER_URL || "";
-const WORKER_AUTH_KEY = process.env.WORKER_AUTH_KEY || "";
-if (!WORKER_URL) console.warn("[CONFIG] WORKER_URL not set — fetching directly from source (may be blocked by CF)");
-if (WORKER_URL) console.log(`[CONFIG] Using CF Worker: ${WORKER_URL}`);
+// ============================================================
+// RESIDENTIAL PROXY ROTATION
+// ============================================================
+// Format per line: IP:PORT:USER:PASS
+const PROXY_LIST_RAW = (process.env.PROXY_LIST || `
+209.74.82.48:30000:mgproxy:MgProxy1775215572
+209.74.82.48:30001:mgproxy:MgProxy1775215572
+209.74.82.48:30002:mgproxy:MgProxy1775215572
+209.74.82.48:30003:mgproxy:MgProxy1775215572
+209.74.82.48:30004:mgproxy:MgProxy1775215572
+209.74.82.48:30005:mgproxy:MgProxy1775215572
+209.74.82.48:30006:mgproxy:MgProxy1775215572
+209.74.82.48:30007:mgproxy:MgProxy1775215572
+209.74.82.48:30008:mgproxy:MgProxy1775215572
+209.74.82.48:30009:mgproxy:MgProxy1775215572
+`).trim().split("\n").map(l => l.trim()).filter(Boolean);
+
+const proxyAgents = PROXY_LIST_RAW.map(line => {
+  const [host, port, user, pass] = line.split(":");
+  const url = `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
+  return new HttpsProxyAgent(url);
+});
+
+let proxyIndex = 0;
+function getNextProxy() {
+  if (proxyAgents.length === 0) return null;
+  const agent = proxyAgents[proxyIndex % proxyAgents.length];
+  proxyIndex++;
+  return agent;
+}
+
+console.log(`[CONFIG] Loaded ${proxyAgents.length} residential proxies (round-robin)`);
 
 // ============================================================
 // RESPONSE CACHE
@@ -449,7 +477,7 @@ function fixStructuredData(data, mirrorOrigin, mirrorHost, requestPath) {
 // ============================================================
 
 app.get("/health", (req, res) => {
-  res.status(200).json({ status: "ok", worker: WORKER_URL ? "configured" : "not-set" });
+  res.status(200).json({ status: "ok", proxies: proxyAgents.length });
 });
 
 // ============================================================
@@ -462,7 +490,6 @@ app.all("*", async (req, res) => {
     const mirrorHost = getMirrorHost(req);
 
     // Build upstream URL
-    // If WORKER_URL is set, fetch via CF Worker; otherwise fetch directly
     let upstreamPath = req.originalUrl;
     if (mirrorHost && upstreamPath.includes(mirrorHost)) {
       upstreamPath = upstreamPath.split(mirrorHost).join(SOURCE_HOST);
@@ -472,8 +499,7 @@ app.all("*", async (req, res) => {
       upstreamPath = upstreamPath.split(reqHost).join(SOURCE_HOST);
     }
 
-    const upstreamBase = WORKER_URL || SOURCE_ORIGIN;
-    const upstreamUrl = `${upstreamBase}${upstreamPath}`;
+    const upstreamUrl = `${SOURCE_ORIGIN}${upstreamPath}`;
 
     // Build headers to send upstream
     const upstreamHeaders = {};
@@ -498,19 +524,9 @@ app.all("*", async (req, res) => {
       }
     }
 
-    // Set host to worker host or source host
-    if (WORKER_URL) {
-      upstreamHeaders["host"] = new URL(WORKER_URL).host;
-    } else {
-      upstreamHeaders["host"] = SOURCE_HOST;
-    }
+    upstreamHeaders["host"] = SOURCE_HOST;
     upstreamHeaders["accept-encoding"] = "identity";
     upstreamHeaders["user-agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-
-    // Add Worker auth key if configured
-    if (WORKER_AUTH_KEY) {
-      upstreamHeaders["x-auth-key"] = WORKER_AUTH_KEY;
-    }
 
     // Rewrite Referer and Origin headers
     if (upstreamHeaders["referer"]) {
@@ -522,11 +538,12 @@ app.all("*", async (req, res) => {
       upstreamHeaders["origin"] = SOURCE_ORIGIN;
     }
 
-    // Fetch options
+    // Fetch options — route through residential proxy
     const fetchOptions = {
       method: req.method,
       headers: upstreamHeaders,
       redirect: "manual",
+      agent: getNextProxy(),
     };
 
     // Forward body for POST/PUT/PATCH
@@ -690,8 +707,9 @@ function copyHeaders(upstream, res) {
 // ============================================================
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Mirror proxy running on port ${PORT}`);
-  console.log(`Proxying: ${WORKER_URL || SOURCE_ORIGIN} -> http://0.0.0.0:${PORT}`);
+  console.log(`Proxying: ${SOURCE_ORIGIN} -> http://0.0.0.0:${PORT}`);
   console.log(`Mirror host: ${MIRROR_HOST || "(auto-detect from request)"}`);
+  console.log(`Proxies: ${proxyAgents.length} residential IPs (round-robin)`);
 });
 
 // Graceful shutdown
