@@ -2,11 +2,7 @@ const express = require("express");
 const fetch = require("node-fetch");
 const cheerio = require("cheerio");
 const compression = require("compression");
-const { URL } = require("url");
 const zlib = require("zlib");
-const { pipeline } = require("stream/promises");
-const { HttpsProxyAgent } = require("https-proxy-agent");
-const { solveCloudflareCookies, browserFetch, closeChrome } = require("./cf-bypass");
 
 // ============================================================
 // CONFIGURATION
@@ -15,10 +11,12 @@ const SOURCE_HOST = process.env.SOURCE_HOST || "id.mgkomik.cc";
 const SOURCE_ORIGIN = `https://${SOURCE_HOST}`;
 const MIRROR_HOST = process.env.MIRROR_HOST || "mgkomik.co";
 const PORT = process.env.PORT || 3000;
-const COOKIE_REFRESH_INTERVAL = parseInt(process.env.COOKIE_REFRESH_MS || "600000"); // 10 min
-const PROXY_URL = process.env.PROXY_URL || "";
-const proxyAgent = PROXY_URL ? new HttpsProxyAgent(PROXY_URL) : null;
-if (PROXY_URL) console.log(`[CONFIG] Using proxy: ${new URL(PROXY_URL).hostname}`);
+
+// Cloudflare Worker URL — fetches from source inside CF's trusted network
+const WORKER_URL = process.env.WORKER_URL || "";
+const WORKER_AUTH_KEY = process.env.WORKER_AUTH_KEY || "";
+if (!WORKER_URL) console.warn("[CONFIG] WORKER_URL not set — fetching directly from source (may be blocked by CF)");
+if (WORKER_URL) console.log(`[CONFIG] Using CF Worker: ${WORKER_URL}`);
 
 // ============================================================
 // RESPONSE CACHE
@@ -45,49 +43,6 @@ function setCache(key, data, ttl) {
     responseCache.delete(oldest);
   }
   responseCache.set(key, { ...data, expires: Date.now() + ttl });
-}
-
-// ============================================================
-// CLOUDFLARE COOKIE MANAGER
-// ============================================================
-let cfCookies = "";
-let cfUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-let cookieRefreshTimer = null;
-let isRefreshing = false;
-
-async function refreshCloudflareCookies() {
-  if (isRefreshing) return;
-  isRefreshing = true;
-  try {
-    console.log("[COOKIE-MGR] Refreshing Cloudflare cookies...");
-    const result = await solveCloudflareCookies(SOURCE_ORIGIN, 45000);
-    if (result.cookies) {
-      cfCookies = result.cookies;
-      cfUserAgent = result.userAgent || cfUserAgent;
-      console.log(`[COOKIE-MGR] Cookies refreshed successfully (${result.cookieArray.length} cookies)`);
-    } else {
-      console.warn("[COOKIE-MGR] No cookies obtained");
-    }
-  } catch (err) {
-    console.error("[COOKIE-MGR] Failed to refresh cookies:", err.message);
-  } finally {
-    isRefreshing = false;
-  }
-}
-
-/**
- * Check if response is a Cloudflare challenge page
- */
-function isCfChallenge(status, body) {
-  if (typeof body === "string") {
-    return (
-      body.includes("Just a moment") ||
-      body.includes("challenge-platform") ||
-      body.includes("cf-chl-widget") ||
-      body.includes("Performing security verification")
-    );
-  }
-  return false;
 }
 
 // ============================================================
@@ -494,7 +449,7 @@ function fixStructuredData(data, mirrorOrigin, mirrorHost, requestPath) {
 // ============================================================
 
 app.get("/health", (req, res) => {
-  res.status(200).json({ status: "ok", cookies: cfCookies ? "ready" : "pending" });
+  res.status(200).json({ status: "ok", worker: WORKER_URL ? "configured" : "not-set" });
 });
 
 // ============================================================
@@ -506,19 +461,19 @@ app.all("*", async (req, res) => {
     const mirrorOrigin = getMirrorOrigin(req);
     const mirrorHost = getMirrorHost(req);
 
-    // Build upstream URL — reverse-rewrite mirror host back to source host in paths
-    // This handles cases where the source site embeds its own hostname in URL paths
-    // e.g. /wp-content/cache/perfmatters/MIRROR_HOST/css/ -> /wp-content/cache/perfmatters/SOURCE_HOST/css/
+    // Build upstream URL
+    // If WORKER_URL is set, fetch via CF Worker; otherwise fetch directly
     let upstreamPath = req.originalUrl;
     if (mirrorHost && upstreamPath.includes(mirrorHost)) {
       upstreamPath = upstreamPath.split(mirrorHost).join(SOURCE_HOST);
     }
-    // Also handle port-based mirror hosts like "localhost:3000" in path
     const reqHost = req.get("host") || "";
     if (reqHost && reqHost !== mirrorHost && upstreamPath.includes(reqHost)) {
       upstreamPath = upstreamPath.split(reqHost).join(SOURCE_HOST);
     }
-    const upstreamUrl = `${SOURCE_ORIGIN}${upstreamPath}`;
+
+    const upstreamBase = WORKER_URL || SOURCE_ORIGIN;
+    const upstreamUrl = `${upstreamBase}${upstreamPath}`;
 
     // Build headers to send upstream
     const upstreamHeaders = {};
@@ -543,17 +498,18 @@ app.all("*", async (req, res) => {
       }
     }
 
-    upstreamHeaders["host"] = SOURCE_HOST;
-    // Request identity (no encoding) to avoid decompression issues
+    // Set host to worker host or source host
+    if (WORKER_URL) {
+      upstreamHeaders["host"] = new URL(WORKER_URL).host;
+    } else {
+      upstreamHeaders["host"] = SOURCE_HOST;
+    }
     upstreamHeaders["accept-encoding"] = "identity";
-    // Use the user-agent from CF bypass session
-    upstreamHeaders["user-agent"] = cfUserAgent;
-    // Inject Cloudflare cookies
-    if (cfCookies) {
-      const existingCookies = upstreamHeaders["cookie"] || "";
-      upstreamHeaders["cookie"] = existingCookies
-        ? `${existingCookies}; ${cfCookies}`
-        : cfCookies;
+    upstreamHeaders["user-agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+    // Add Worker auth key if configured
+    if (WORKER_AUTH_KEY) {
+      upstreamHeaders["x-auth-key"] = WORKER_AUTH_KEY;
     }
 
     // Rewrite Referer and Origin headers
@@ -570,8 +526,7 @@ app.all("*", async (req, res) => {
     const fetchOptions = {
       method: req.method,
       headers: upstreamHeaders,
-      redirect: "manual", // Handle redirects ourselves
-      agent: proxyAgent, // Use proxy if configured (null = direct)
+      redirect: "manual",
     };
 
     // Forward body for POST/PUT/PATCH
@@ -632,32 +587,10 @@ app.all("*", async (req, res) => {
 
     const contentType = upstream.headers.get("content-type") || "";
 
-    // --- CHECK FOR CLOUDFLARE CHALLENGE ---
+    // --- PROCESS HTML ---
     if (isHtml(contentType)) {
       const buffer = await getResponseBuffer(upstream);
       let html = buffer.toString("utf-8");
-
-      // If we got a CF challenge, try serving from cache or trigger background refresh
-      if (isCfChallenge(upstream.status, html)) {
-        console.log(`[CF-CHALLENGE] Challenge detected on ${req.path}`);
-
-        // Try to serve from cache
-        const cached = getCached(`html:${req.path}`);
-        if (cached) {
-          console.log(`[CACHE] Serving cached version of ${req.path}`);
-          res.set("Content-Type", "text/html; charset=utf-8");
-          res.set("X-Cache", "HIT-CF-FALLBACK");
-          return res.status(200).send(cached.body);
-        }
-
-        // No cache available — trigger background cookie refresh and return 503
-        if (!isRefreshing) {
-          console.log("[CF-CHALLENGE] Triggering background cookie refresh...");
-          refreshCloudflareCookies();
-        }
-        res.status(503).set("Retry-After", "30");
-        return res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Loading...</title><meta http-equiv="refresh" content="30"></head><body style="font-family:sans-serif;text-align:center;padding:60px"><h2>Situs sedang memuat...</h2><p>Halaman akan refresh otomatis dalam 30 detik.</p></body></html>`);
-      }
 
       // --- REWRITE HTML ---
       html = rewriteHtml(html, mirrorOrigin, mirrorHost, req.path);
@@ -670,7 +603,7 @@ app.all("*", async (req, res) => {
 
       res.set("Content-Type", contentType);
       res.set("X-Cache", "MISS");
-      return res.status(200).send(html);
+      return res.status(upstream.status).send(html);
     }
 
     // --- REWRITE XML (sitemaps, RSS feeds) ---
@@ -755,43 +688,15 @@ function copyHeaders(upstream, res) {
 // ============================================================
 // START SERVER
 // ============================================================
-async function startServer() {
-  // Start the server first so it's accessible
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Mirror proxy running on port ${PORT}`);
-    console.log(`Proxying: ${SOURCE_ORIGIN} -> http://0.0.0.0:${PORT}`);
-    console.log(`Mirror host: ${MIRROR_HOST || "(auto-detect from request)"}`);
-    console.log(`Cookie refresh interval: ${COOKIE_REFRESH_INTERVAL / 1000}s`);
-  });
-
-  // Then solve Cloudflare challenge in the background
-  console.log("[STARTUP] Solving Cloudflare challenge in background...");
-  refreshCloudflareCookies();
-
-  // Schedule periodic cookie refresh
-  cookieRefreshTimer = setInterval(() => {
-    refreshCloudflareCookies();
-  }, COOKIE_REFRESH_INTERVAL);
-}
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Mirror proxy running on port ${PORT}`);
+  console.log(`Proxying: ${WORKER_URL || SOURCE_ORIGIN} -> http://0.0.0.0:${PORT}`);
+  console.log(`Mirror host: ${MIRROR_HOST || "(auto-detect from request)"}`);
+});
 
 // Graceful shutdown
-process.on("SIGINT", async () => {
-  console.log("\n[SHUTDOWN] Cleaning up...");
-  clearInterval(cookieRefreshTimer);
-  await closeChrome();
-  process.exit(0);
-});
-process.on("SIGTERM", async () => {
-  console.log("\n[SHUTDOWN] Cleaning up...");
-  clearInterval(cookieRefreshTimer);
-  await closeChrome();
-  process.exit(0);
-});
-
-startServer().catch((err) => {
-  console.error("[FATAL] Failed to start:", err);
-  process.exit(1);
-});
+process.on("SIGINT", () => process.exit(0));
+process.on("SIGTERM", () => process.exit(0));
 
 // Prevent unhandled errors from crashing the server
 process.on("unhandledRejection", (err) => {
