@@ -309,7 +309,8 @@ function rewriteHtml(html, mirrorOrigin, mirrorHost, requestPath) {
 
   // --- 0b. REPLACE HISTATS COUNTER ---
   $("#histats_counter").remove();
-  $("body").append(`<!-- Histats.com (div with counter) --><div id="histats_counter"></div>
+  $("body").append(`<!-- Histats.com (div with counter) --><div id="histats_counter" style="display:flex;justify-content:center;padding:10px 0;"></div>
+<style>#histats_counter canvas{background:#1a1a2e!important;border-radius:4px;}</style>
 <!-- Histats.com START (aync)-->
 <script type="text/javascript">var _Hasync= _Hasync|| [];
 _Hasync.push(['Histats.start', '1,5018261,4,16,150,30,00010001']);
