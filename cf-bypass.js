@@ -5,6 +5,30 @@ let _page = null;
 let _launching = null; // prevents concurrent launches
 
 /**
+ * Parse PROXY_URL env var into proxy config for puppeteer-real-browser
+ * Supports: http://user:pass@host:port, socks5://host:port, http://host:port
+ */
+function getProxyConfig() {
+  const proxyUrl = process.env.PROXY_URL;
+  if (!proxyUrl) return null;
+
+  try {
+    const url = new URL(proxyUrl);
+    const config = {
+      host: url.hostname,
+      port: parseInt(url.port) || (url.protocol === "socks5:" ? 1080 : 8080),
+    };
+    if (url.username) config.username = decodeURIComponent(url.username);
+    if (url.password) config.password = decodeURIComponent(url.password);
+    console.log(`[CF-BYPASS] Using proxy: ${url.hostname}:${config.port}`);
+    return config;
+  } catch (e) {
+    console.error("[CF-BYPASS] Invalid PROXY_URL:", e.message);
+    return null;
+  }
+}
+
+/**
  * Get or launch the persistent browser with Turnstile auto-solve
  */
 async function getBrowser() {
@@ -16,11 +40,19 @@ async function getBrowser() {
   _launching = (async () => {
     console.log("[CF-BYPASS] Launching real browser with Turnstile solver...");
 
-    const { page, browser } = await connect({
-      headless: false, // Headed mode via xvfb
+    const connectOptions = {
+      headless: false, // Headed mode required for Turnstile
       turnstile: true, // Auto-solve Cloudflare Turnstile
       args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-    });
+    };
+
+    // Add proxy if configured
+    const proxy = getProxyConfig();
+    if (proxy) {
+      connectOptions.proxy = proxy;
+    }
+
+    const { page, browser } = await connect(connectOptions);
 
     _browser = browser;
     _page = page; // Keep a reference to the initial page

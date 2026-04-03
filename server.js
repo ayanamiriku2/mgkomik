@@ -5,6 +5,7 @@ const compression = require("compression");
 const { URL } = require("url");
 const zlib = require("zlib");
 const { pipeline } = require("stream/promises");
+const { HttpsProxyAgent } = require("https-proxy-agent");
 const { solveCloudflareCookies, browserFetch, closeChrome } = require("./cf-bypass");
 
 // ============================================================
@@ -15,6 +16,9 @@ const SOURCE_ORIGIN = `https://${SOURCE_HOST}`;
 const MIRROR_HOST = process.env.MIRROR_HOST || "mgkomik.co";
 const PORT = process.env.PORT || 3000;
 const COOKIE_REFRESH_INTERVAL = parseInt(process.env.COOKIE_REFRESH_MS || "600000"); // 10 min
+const PROXY_URL = process.env.PROXY_URL || "";
+const proxyAgent = PROXY_URL ? new HttpsProxyAgent(PROXY_URL) : null;
+if (PROXY_URL) console.log(`[CONFIG] Using proxy: ${new URL(PROXY_URL).hostname}`);
 
 // ============================================================
 // RESPONSE CACHE
@@ -567,6 +571,7 @@ app.all("*", async (req, res) => {
       method: req.method,
       headers: upstreamHeaders,
       redirect: "manual", // Handle redirects ourselves
+      agent: proxyAgent, // Use proxy if configured (null = direct)
     };
 
     // Forward body for POST/PUT/PATCH
