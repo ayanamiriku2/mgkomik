@@ -309,8 +309,9 @@ function rewriteHtml(html, mirrorOrigin, mirrorHost, requestPath) {
 
   // --- 0b. REPLACE HISTATS COUNTER ---
   $("#histats_counter").remove();
-  $("body").append(`<!-- Histats.com (div with counter) --><div id="histats_counter" style="display:flex;justify-content:center;padding:10px 0;"></div>
-<style>#histats_counter canvas{background:#1a1a2e!important;border-radius:4px;}</style>
+  // Insert inside the footer, centered, with matching dark background
+  const histatsHtml = `<!-- Histats.com (div with counter) --><div id="histats_counter" style="display:flex;justify-content:center;padding:10px 0;background:inherit;"></div>
+<style>#histats_counter,#histats_counter *{background:transparent!important;}#histats_counter canvas{border-radius:4px;}</style>
 <!-- Histats.com START (aync)-->
 <script type="text/javascript">var _Hasync= _Hasync|| [];
 _Hasync.push(['Histats.start', '1,5018261,4,16,150,30,00010001']);
@@ -322,7 +323,13 @@ hs.src = ('//s10.histats.com/js15_as.js');
 (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(hs);
 })();</script>
 <noscript><a href="/" target="_blank"><img src="//sstatic1.histats.com/0.gif?5018261&101" alt="" border="0"></a></noscript>
-<!-- Histats.com END -->`);
+<!-- Histats.com END -->`;
+  // Try to place inside footer, otherwise append to body
+  if ($("footer").length) {
+    $("footer").append(histatsHtml);
+  } else {
+    $("body").append(histatsHtml);
+  }
 
   const canonicalUrl = `${mirrorOrigin}${requestPath}`;
 
