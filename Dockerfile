@@ -3,7 +3,7 @@ FROM node:20-bookworm-slim
 # Install Chrome + xvfb for virtual display
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       wget gnupg ca-certificates xvfb \
+       wget gnupg ca-certificates xvfb xauth \
     && wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor > /usr/share/keyrings/google-chrome.gpg \
     && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
     && apt-get update \
