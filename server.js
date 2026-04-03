@@ -459,6 +459,14 @@ function fixStructuredData(data, mirrorOrigin, mirrorHost, requestPath) {
 }
 
 // ============================================================
+// HEALTH CHECK
+// ============================================================
+
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "ok", cookies: cfCookies ? "ready" : "pending" });
+});
+
+// ============================================================
 // PROXY HANDLER
 // ============================================================
 
