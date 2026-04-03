@@ -829,6 +829,8 @@ function copyHeaders(upstream, res) {
     "strict-transport-security",
     "content-security-policy",
     "x-frame-options",
+    "location",
+    "x-robots-tag",
   ]);
 
   upstream.headers.forEach((value, key) => {
