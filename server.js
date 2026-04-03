@@ -4,6 +4,7 @@ const cheerio = require("cheerio");
 const compression = require("compression");
 const zlib = require("zlib");
 const { HttpsProxyAgent } = require("https-proxy-agent");
+const { HttpProxyAgent } = require("http-proxy-agent");
 
 // ============================================================
 // CONFIGURATION
@@ -12,6 +13,7 @@ const SOURCE_HOST = process.env.SOURCE_HOST || "id.mgkomik.cc";
 const SOURCE_ORIGIN = `https://${SOURCE_HOST}`;
 const MIRROR_HOST = process.env.MIRROR_HOST || "mgkomik.co";
 const PORT = process.env.PORT || 3000;
+const WORKER_URL = process.env.WORKER_URL || "";
 
 // ============================================================
 // RESIDENTIAL PROXY ROTATION
@@ -30,21 +32,31 @@ const PROXY_LIST_RAW = (process.env.PROXY_LIST || `
 209.74.82.48:30009:mgproxy:MgProxy1775215572
 `).trim().split("\n").map(l => l.trim()).filter(Boolean);
 
-const proxyAgents = PROXY_LIST_RAW.map(line => {
+const proxyUrls = PROXY_LIST_RAW.map(line => {
   const [host, port, user, pass] = line.split(":");
-  const url = `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
-  return new HttpsProxyAgent(url);
+  return `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
 });
 
 let proxyIndex = 0;
-function getNextProxy() {
-  if (proxyAgents.length === 0) return null;
-  const agent = proxyAgents[proxyIndex % proxyAgents.length];
+function getNextProxyUrl() {
+  if (proxyUrls.length === 0) return null;
+  const url = proxyUrls[proxyIndex % proxyUrls.length];
   proxyIndex++;
-  return agent;
+  return url;
 }
 
-console.log(`[CONFIG] Loaded ${proxyAgents.length} residential proxies (round-robin)`);
+// Create agent for a given proxy URL and target protocol
+function makeAgent(proxyUrl, targetUrl) {
+  if (targetUrl.startsWith("https:")) {
+    return new HttpsProxyAgent(proxyUrl);
+  }
+  return new HttpProxyAgent(proxyUrl);
+}
+
+const MAX_PROXY_RETRIES = Math.min(proxyUrls.length, 3); // try up to 3 different proxies
+
+console.log(`[CONFIG] ${proxyUrls.length} residential proxies (round-robin, ${MAX_PROXY_RETRIES} retries)`);
+if (WORKER_URL) console.log(`[CONFIG] CF Worker fallback: ${WORKER_URL}`);
 
 // ============================================================
 // RESPONSE CACHE
@@ -477,7 +489,7 @@ function fixStructuredData(data, mirrorOrigin, mirrorHost, requestPath) {
 // ============================================================
 
 app.get("/health", (req, res) => {
-  res.status(200).json({ status: "ok", proxies: proxyAgents.length });
+  res.status(200).json({ status: "ok", proxies: proxyUrls.length });
 });
 
 // ============================================================
@@ -538,15 +550,8 @@ app.all("*", async (req, res) => {
       upstreamHeaders["origin"] = SOURCE_ORIGIN;
     }
 
-    // Fetch options — route through residential proxy
-    const fetchOptions = {
-      method: req.method,
-      headers: upstreamHeaders,
-      redirect: "manual",
-      agent: getNextProxy(),
-    };
-
-    // Forward body for POST/PUT/PATCH
+    // Buffer body for POST/PUT/PATCH (needed for retries)
+    let reqBody = null;
     if (["POST", "PUT", "PATCH"].includes(req.method)) {
       const bodyChunks = [];
       for await (const chunk of req) {
@@ -554,15 +559,59 @@ app.all("*", async (req, res) => {
       }
       const body = Buffer.concat(bodyChunks);
       if (body.length > 0) {
-        fetchOptions.body = body;
-        if (req.headers["content-type"]) {
-          fetchOptions.headers["content-type"] = req.headers["content-type"];
-        }
+        reqBody = body;
       }
     }
 
-    // Fetch from upstream
-    const upstream = await fetch(upstreamUrl, fetchOptions);
+    // Fetch with retry: try proxies first, then fallback to direct
+    let upstream = null;
+    let lastErr = null;
+
+    // 1) Try through residential proxies (round-robin, up to MAX_PROXY_RETRIES)
+    for (let attempt = 0; attempt < MAX_PROXY_RETRIES; attempt++) {
+      const proxyUrl = getNextProxyUrl();
+      if (!proxyUrl) break;
+      try {
+        const opts = {
+          method: req.method,
+          headers: { ...upstreamHeaders },
+          redirect: "manual",
+          agent: makeAgent(proxyUrl, upstreamUrl),
+          timeout: 15000,
+        };
+        if (reqBody) {
+          opts.body = reqBody;
+          if (req.headers["content-type"]) opts.headers["content-type"] = req.headers["content-type"];
+        }
+        upstream = await fetch(upstreamUrl, opts);
+        break; // success
+      } catch (err) {
+        const short = proxyUrl.replace(/\/\/.*@/, "//***@");
+        console.warn(`[PROXY ${attempt+1}/${MAX_PROXY_RETRIES}] ${short} failed: ${err.message}`);
+        lastErr = err;
+      }
+    }
+
+    // 2) Fallback: direct connection (no proxy)
+    if (!upstream) {
+      try {
+        console.log(`[FALLBACK] All proxies failed, trying direct connection...`);
+        const opts = {
+          method: req.method,
+          headers: { ...upstreamHeaders },
+          redirect: "manual",
+          timeout: 20000,
+        };
+        if (reqBody) {
+          opts.body = reqBody;
+          if (req.headers["content-type"]) opts.headers["content-type"] = req.headers["content-type"];
+        }
+        upstream = await fetch(upstreamUrl, opts);
+      } catch (err) {
+        console.error(`[FALLBACK] Direct also failed: ${err.message}`);
+        throw lastErr || err;
+      }
+    }
 
     // --- Handle redirects: rewrite Location header ---
     if ([301, 302, 303, 307, 308].includes(upstream.status)) {
@@ -709,7 +758,7 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Mirror proxy running on port ${PORT}`);
   console.log(`Proxying: ${SOURCE_ORIGIN} -> http://0.0.0.0:${PORT}`);
   console.log(`Mirror host: ${MIRROR_HOST || "(auto-detect from request)"}`);
-  console.log(`Proxies: ${proxyAgents.length} residential IPs (round-robin)`);
+  console.log(`Proxies: ${proxyUrls.length} residential IPs (round-robin, ${MAX_PROXY_RETRIES} retries, direct fallback)`);
 });
 
 // Graceful shutdown
