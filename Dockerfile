@@ -19,4 +19,5 @@ COPY . .
 
 EXPOSE 3000
 
-CMD ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1920x1080x24", "node", "server.js"]
+# Start Xvfb in background, then run Node
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp &  sleep 1 && DISPLAY=:99 node server.js"]

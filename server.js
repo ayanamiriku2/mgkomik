@@ -753,3 +753,11 @@ startServer().catch((err) => {
   console.error("[FATAL] Failed to start:", err);
   process.exit(1);
 });
+
+// Prevent unhandled errors from crashing the server
+process.on("unhandledRejection", (err) => {
+  console.error("[UNHANDLED REJECTION]", err);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[UNCAUGHT EXCEPTION]", err);
+});
