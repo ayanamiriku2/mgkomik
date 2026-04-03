@@ -1,0 +1,21 @@
+{
+  "name": "mgkomik-mirror",
+  "version": "1.0.0",
+  "description": "Full mirror proxy for mgkomik with SEO optimization and Cloudflare bypass",
+  "main": "server.js",
+  "scripts": {
+    "start": "xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24' node server.js",
+    "start:no-xvfb": "node server.js",
+    "dev": "xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24' node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "compression": "^1.7.4",
+    "express": "^4.21.0",
+    "node-fetch": "^2.7.0",
+    "puppeteer-real-browser": "^1.4.4"
+  }
+}
