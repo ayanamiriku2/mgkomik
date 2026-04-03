@@ -333,6 +333,16 @@ hs.src = ('//s10.histats.com/js15_as.js');
 
   const canonicalUrl = `${mirrorOrigin}${requestPath}`;
 
+  // --- 0c. FORCE INDEXING — remove noindex tags ---
+  // Source site may set noindex on some pages; we want all pages indexed on our mirror
+  $('meta[name="robots"]').remove();
+  $('meta[name="googlebot"]').remove();
+  $('meta[name="bingbot"]').remove();
+  $("head").append('<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />');
+
+  // Also remove any X-Robots-Tag in <meta http-equiv>
+  $('meta[http-equiv="X-Robots-Tag"]').remove();
+
   // --- 1. FIX CANONICAL TAG ---
   // Remove all existing canonical links and add exactly one correct one
   $('link[rel="canonical"]').remove();
@@ -688,6 +698,8 @@ app.all("*", async (req, res) => {
     res.removeHeader("content-encoding");
     res.removeHeader("content-length");
     res.removeHeader("transfer-encoding");
+    // Remove noindex from HTTP headers
+    res.removeHeader("x-robots-tag");
 
     // Add security headers
     res.set("X-Content-Type-Options", "nosniff");
