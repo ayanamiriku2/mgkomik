@@ -528,6 +528,22 @@ app.all("*", async (req, res) => {
       "connection",
       "transfer-encoding",
       "content-length",
+      // Strip Client Hints — mobile browsers send these and CF detects
+      // the mismatch with our desktop user-agent → triggers challenge
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "sec-ch-ua-platform",
+      "sec-ch-ua-platform-version",
+      "sec-ch-ua-full-version",
+      "sec-ch-ua-full-version-list",
+      "sec-ch-ua-arch",
+      "sec-ch-ua-bitness",
+      "sec-ch-ua-model",
+      "sec-ch-ua-wow64",
+      "sec-fetch-dest",
+      "sec-fetch-mode",
+      "sec-fetch-site",
+      "sec-fetch-user",
     ]);
 
     for (const [key, value] of Object.entries(req.headers)) {
@@ -539,6 +555,14 @@ app.all("*", async (req, res) => {
     upstreamHeaders["host"] = SOURCE_HOST;
     upstreamHeaders["accept-encoding"] = "identity";
     upstreamHeaders["user-agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+    // Send matching desktop Client Hints so CF doesn't detect a mismatch
+    upstreamHeaders["sec-ch-ua"] = '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"';
+    upstreamHeaders["sec-ch-ua-mobile"] = "?0";
+    upstreamHeaders["sec-ch-ua-platform"] = '"Windows"';
+    upstreamHeaders["sec-fetch-dest"] = "document";
+    upstreamHeaders["sec-fetch-mode"] = "navigate";
+    upstreamHeaders["sec-fetch-site"] = "none";
+    upstreamHeaders["sec-fetch-user"] = "?1";
 
     // Rewrite Referer and Origin headers
     if (upstreamHeaders["referer"]) {
@@ -657,6 +681,33 @@ app.all("*", async (req, res) => {
     if (isHtml(contentType)) {
       const buffer = await getResponseBuffer(upstream);
       let html = buffer.toString("utf-8");
+
+      // Detect CF challenge page — don't serve it to users
+      if (
+        html.includes("Just a moment") ||
+        html.includes("challenge-platform") ||
+        html.includes("cf-chl-widget")
+      ) {
+        console.warn(`[CF-CHALLENGE] Blocked on ${req.path} — serving from cache or error`);
+
+        // Try serving from cache
+        const cached = getCached(`html:${req.path}`);
+        if (cached) {
+          console.log(`[CACHE] Serving cached version of ${req.path}`);
+          res.set("Content-Type", "text/html; charset=utf-8");
+          res.set("X-Cache", "HIT-CF-FALLBACK");
+          return res.status(200).send(cached.body);
+        }
+
+        // No cache — return friendly reload page
+        return res.status(503).set("Retry-After", "5").send(
+          `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Loading...</title>` +
+          `<meta http-equiv="refresh" content="5">` +
+          `</head><body style="font-family:sans-serif;text-align:center;padding:60px">` +
+          `<h2>Halaman sedang dimuat...</h2>` +
+          `<p>Refresh otomatis dalam 5 detik.</p></body></html>`
+        );
+      }
 
       // --- REWRITE HTML ---
       html = rewriteHtml(html, mirrorOrigin, mirrorHost, req.path);
