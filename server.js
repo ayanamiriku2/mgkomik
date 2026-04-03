@@ -17,6 +17,33 @@ const PORT = process.env.PORT || 3000;
 const COOKIE_REFRESH_INTERVAL = parseInt(process.env.COOKIE_REFRESH_MS || "600000"); // 10 min
 
 // ============================================================
+// RESPONSE CACHE
+// ============================================================
+const responseCache = new Map();
+const CACHE_TTL_HTML = 5 * 60 * 1000;   // 5 minutes for HTML pages
+const CACHE_TTL_STATIC = 60 * 60 * 1000; // 1 hour for static assets
+const CACHE_MAX_SIZE = 500;
+
+function getCached(key) {
+  const entry = responseCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expires) {
+    responseCache.delete(key);
+    return null;
+  }
+  return entry;
+}
+
+function setCache(key, data, ttl) {
+  // Evict oldest entries if cache is full
+  if (responseCache.size >= CACHE_MAX_SIZE) {
+    const oldest = responseCache.keys().next().value;
+    responseCache.delete(oldest);
+  }
+  responseCache.set(key, { ...data, expires: Date.now() + ttl });
+}
+
+// ============================================================
 // CLOUDFLARE COOKIE MANAGER
 // ============================================================
 let cfCookies = "";
@@ -605,23 +632,26 @@ app.all("*", async (req, res) => {
       const buffer = await getResponseBuffer(upstream);
       let html = buffer.toString("utf-8");
 
-      // If we got a CF challenge, try browser fetch as fallback
+      // If we got a CF challenge, try serving from cache or trigger background refresh
       if (isCfChallenge(upstream.status, html)) {
-        console.log(`[CF-BYPASS] Challenge detected on ${req.path}, using browser fallback...`);
-        try {
-          const browserResult = await browserFetch(upstreamUrl);
-          html = browserResult.body;
-          // Update cookies for future requests
-          if (browserResult.cookies) {
-            cfCookies = browserResult.cookies;
-            cfUserAgent = browserResult.userAgent || cfUserAgent;
-            console.log("[CF-BYPASS] Cookies updated from browser fallback");
-          }
-        } catch (browserErr) {
-          console.error("[CF-BYPASS] Browser fallback failed:", browserErr.message);
-          res.status(503).send("Service temporarily unavailable - retrying connection");
-          return;
+        console.log(`[CF-CHALLENGE] Challenge detected on ${req.path}`);
+
+        // Try to serve from cache
+        const cached = getCached(`html:${req.path}`);
+        if (cached) {
+          console.log(`[CACHE] Serving cached version of ${req.path}`);
+          res.set("Content-Type", "text/html; charset=utf-8");
+          res.set("X-Cache", "HIT-CF-FALLBACK");
+          return res.status(200).send(cached.body);
         }
+
+        // No cache available — trigger background cookie refresh and return 503
+        if (!isRefreshing) {
+          console.log("[CF-CHALLENGE] Triggering background cookie refresh...");
+          refreshCloudflareCookies();
+        }
+        res.status(503).set("Retry-After", "30");
+        return res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Loading...</title><meta http-equiv="refresh" content="30"></head><body style="font-family:sans-serif;text-align:center;padding:60px"><h2>Situs sedang memuat...</h2><p>Halaman akan refresh otomatis dalam 30 detik.</p></body></html>`);
       }
 
       // --- REWRITE HTML ---
@@ -630,7 +660,11 @@ app.all("*", async (req, res) => {
       // Final pass: rewrite any remaining URLs in the raw HTML string
       html = rewriteUrls(html, mirrorOrigin, mirrorHost);
 
+      // Cache the successful response
+      setCache(`html:${req.path}`, { body: html, contentType }, CACHE_TTL_HTML);
+
       res.set("Content-Type", contentType);
+      res.set("X-Cache", "MISS");
       return res.status(200).send(html);
     }
 
